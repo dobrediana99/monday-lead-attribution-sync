@@ -1,11 +1,40 @@
 # monday-lead-attribution-sync
 
-Aplicație **serverless** pentru **Netlify** (Node.js, fără TypeScript) care ascultă webhook-uri de la **monday.com**. Când un rând din boardul **„Comenzi / Curse”** are coloana **„Status Transport”** setată exact la **„Finalizat / Livrat”**, funcția caută un lead corespunzător în **„Solicitari”** sau **„Solicitari 2”** (după regulile de mai jos) și, dacă îl găsește, actualizează comanda:
-
-1. **„Sursa Client”** → eticheta **„Website”**  
-2. **„link to Solicitari”** → relație către itemul lead găsit  
+Aplicație **serverless** pentru **Netlify** (Node.js, fără TypeScript) care ascultă webhook-uri de la **monday.com**. Când un rând din boardul **„Comenzi / Curse”** are coloana **„Status Transport”** setată exact la **„Finalizat / Livrat”**, funcția caută un lead în **„Solicitari”** apoi în **„Solicitari 2”** și, dacă găsește un lead valid, actualizează comanda conform boardului de proveniență al lead‑ului.
 
 Integrarea se face prin **Netlify Functions** și **monday GraphQL API** (`fetch`).
+
+---
+
+## Ce face aplicația (comportament real)
+
+### Lead din **„Solicitari”** (board `1905911565`)
+
+- Setează **„Sursa Client”** la eticheta **„Website”**.
+- Completează relația **„link to Solicitari”** (`board_relation_mm21tkwr`) cu ID‑ul lead‑ului. Această coloană acceptă **doar** iteme din boardul **„Solicitari”**.
+
+### Lead din **„Solicitari 2”** (board `5092436128`)
+
+- Setează **„Sursa Client”** la **„Website”**.
+- **Nu** scrie în **„link to Solicitari”** (relația nu acceptă iteme din acest board).
+- După un **update reușit**, trimite **notificare** persoanei din coloana **„Principal”** (`deal_owner`), prin API (vezi mai jos). Dacă **Principal** lipsește, se creează un **singur** `create_update` pe item cu mesajul explicativ (fără mențiune), pentru audit.
+
+### Notificarea către **Principal**
+
+- **Nu** se configurează printr-o automatizare monday separată pentru notificare: aplicația apelează API‑ul monday.
+- **Preferat:** `create_notification` (notificare în clopoțel), cu `target_id` = itemul comenzii.
+- **Fallback:** dacă `create_notification` eșuează, se folosește **`create_update`** cu **`mentions_list`** către userul din **Principal** (când există).
+
+Notificarea / fallback‑ul cu mențiune rulează **doar după** `change_multiple_column_values` reușit și **doar dacă** tocmai s-a făcut o schimbare necesară (vezi idempotency).
+
+### Idempotency (fără update / fără notificare la rerulare)
+
+Dacă itemul este **deja** în starea dorită:
+
+- **„Sursa Client”** este deja **„Website”**, și
+- pentru lead din **„Solicitari”**: relația **„link to Solicitari”** conține deja ID‑ul lead‑ului găsit,
+
+atunci funcția **nu** apelează `change_multiple_column_values`, **nu** trimite notificare și răspunde cu `skipped: "no changes needed"`.
 
 ---
 
@@ -13,8 +42,8 @@ Integrarea se face prin **Netlify Functions** și **monday GraphQL API** (`fetch
 
 | Fișier / folder | Rol |
 |-----------------|-----|
-| `netlify/functions/monday-webhook.js` | Funcția serverless: verificare challenge, webhook, logică matching + update |
-| `netlify.toml` | Configurare Netlify (director functions) |
+| `netlify/functions/monday-webhook.js` | Funcția serverless: challenge, webhook, matching, update, notificare |
+| `netlify.toml` | Director functions + bundler |
 | `package.json` | Metadate minimale; Node **≥ 18** (fetch nativ) |
 | `.env.example` | Exemplu variabile de mediu |
 
@@ -26,35 +55,32 @@ Nu există UI, bază de date sau framework web.
 
 | Variabilă | Descriere |
 |-----------|-----------|
-| `MONDAY_API_TOKEN` | Token API monday cu drepturi de **citire** pe boardurile implicate și **scriere** pe **„Comenzi / Curse”** (items + coloanele menționate). |
+| `MONDAY_API_TOKEN` | Token API monday cu **citire** pe boardurile implicate și **scriere** pe **„Comenzi / Curse”**; pentru notificări: permisiuni pentru `create_notification` și `create_update` (după caz). |
 
-Copiază `.env.example` în `.env` pentru teste locale cu Netlify CLI (opțional).
+Pe Netlify: **Site settings → Environment variables** → `MONDAY_API_TOKEN`.
 
-Pe Netlify: **Site settings → Environment variables** → adaugă `MONDAY_API_TOKEN`.
+---
+
+## `netlify.toml`
+
+```toml
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+```
+
+Directorul funcțiilor este setat **explicit** sub `[functions]` (conform cerinței proiectului).
 
 ---
 
 ## Deploy pe Netlify
 
-1. **Creează un repo Git** cu acest conținut (sau încarcă folderul în GitHub/GitLab/Bitbucket).
-
-2. În [Netlify](https://www.netlify.com/): **Add new site → Import an existing project** și conectează repo-ul.
-
-3. Setări build (în general Netlify detectează singur):
-   - Nu este obligatoriu un build step dacă nu folosești dependențe npm.
-   - Directorul functions este definit în `netlify.toml` (`functions = "netlify/functions"`).
-
-4. Adaugă variabila **`MONDAY_API_TOKEN`** în **Site settings → Environment variables** (aceeași valoare ca tokenul monday folosit la API).
-
-5. Deploy. După publicare, URL-ul funcției va fi:
+1. Import repo în Netlify, adaugă **`MONDAY_API_TOKEN`**.
+2. URL funcție după deploy:
 
    `https://<subdomeniul-tău>.netlify.app/.netlify/functions/monday-webhook`
 
-   Exemplu: dacă site-ul este `https://hero-site.netlify.app`, endpointul complet este:
-
-   `https://hero-site.netlify.app/.netlify/functions/monday-webhook`
-
-6. **Test rapid challenge** (monday trimite asta la configurarea webhook-ului):
+3. **Challenge** monday:
 
    ```bash
    curl -X POST "https://<subdomeniul-tău>.netlify.app/.netlify/functions/monday-webhook" ^
@@ -62,76 +88,61 @@ Pe Netlify: **Site settings → Environment variables** → adaugă `MONDAY_API_
      -d "{\"challenge\":\"test123\"}"
    ```
 
-   Răspuns așteptat: `{"challenge":"test123"}`.
+   Răspuns: `{"challenge":"test123"}`.
 
 ---
 
 ## Cum configurezi monday
 
-### 1. Automatizare la schimbarea statusului
+### Automatizare webhook (suficient pentru trigger)
 
-În monday, creează o **automatizare / integrare** care rulează când:
+Creează o automatizare care rulează când **„Status Transport”** devine **„Finalizat / Livrat”** și trimite **webhook POST** la URL‑ul funcției Netlify de mai sus.
 
-- coloana **„Status Transport”** devine **„Finalizat / Livrat”**  
-  (sau echivalent: „când se schimbă la această valoare”).
+**Notificarea către Principal nu se face din această automatizare** — o face aplicația prin API, după update, conform secțiunii de mai sus.
 
-Acțiunea trebuie să fie **„Send webhook”** / **„Trimite webhook”** (denumirea exactă poate varia după limbă și plan).
+### Challenge
 
-### 2. URL webhook
-
-Setează URL-ul la:
-
-`https://<subdomeniul-tău>.netlify.app/.netlify/functions/monday-webhook`
-
-Metoda: **POST**, tip conținut: **JSON** (dacă monday cere aceste opțiuni).
-
-### 3. Verificarea (challenge)
-
-La prima salvare, monday trimite un payload de verificare de forma:
-
-```json
-{ "challenge": "..." }
-```
-
-Aplicația răspunde cu **același** câmp `challenge` în JSON. Fără acest pas, monday poate refuza webhook-ul.
-
-### 4. Scopuri API (recomandat)
-
-Tokenul API trebuie să poată:
-
-- citi itemi și valori de coloană pe boardurile **Comenzi / Curse**, **Solicitari**, **Solicitari 2**;
-- rula interogări precum `items_page_by_column_values` / `next_items_page`;
-- executa mutația `change_multiple_column_values` pe boardul **Comenzi / Curse**.
-
-Dacă apare **403** sau erori de permisiuni, verifică rolul utilizatorului asociat tokenului și scope-urile aplicației API.
+monday poate trimite `{ "challenge": "..." }`; funcția răspunde cu același JSON.
 
 ---
 
-## Comportament și reguli de matching
+## Boarduri și coloane (referință)
 
-1. **Challenge** → răspuns `{ "challenge": "<valoare>" }`.
+### „Comenzi / Curse” — `2030349838`
 
-2. **Webhook real** → se încearcă extragerea **ID-ului itemului** din payload (mai multe căi posibile: `itemId`, `pulseId`, `event.*`, etc.).
+| Coloană | ID |
+|--------|-----|
+| Status Transport | `color_mkse52dk` → **„Finalizat / Livrat”** |
+| Email Semnare Client | `email_mkse8jyb` |
+| GCLID | `text_mm21cvwz` |
+| Sursa Client | `color_mktcvtpz` → **„Website”** |
+| link to Solicitari | `board_relation_mm21tkwr` (doar board **1905911565**) |
+| Principal | `deal_owner` (people, max 1) |
 
-3. Se citește itemul prin API (`items`) și se verifică că este pe boardul **Comenzi / Curse** (`2030349838`).
+### „Solicitari” — `1905911565`
 
-4. Se citește **„Status Transport”** din datele API (nu doar din payload). Dacă eticheta nu este **exact** `Finalizat / Livrat`, răspuns de tip skip.
+| Coloană | ID |
+|--------|-----|
+| Email Client | `email_mkvmar5w` |
+| GCLID | `text_mm1h3m1v` |
 
-5. Se citesc **email** (coloana „Email Semnare Client”) și **GCLID** (coloana „GCLID”) ale comenzii. Emailul este normalizat: **trim + lowercase**.
+### „Solicitari 2” — `5092436128`
 
-6. **Board „Solicitari”** (căutare după email prin API, apoi filtrare în cod):
-   - email comandă = email solicitare (după normalizare);
-   - pe solicitare, **GCLID trebuie să existe și să nu fie gol**;
-   - dacă comanda are GCLID nevid: trebuie **egalitate strictă** GCLID comandă ↔ GCLID solicitare;
-   - dacă comanda **nu** are GCLID: se acceptă solicitarea **doar dacă** GCLID-ul solicitării este completat (nevid).
+| Coloană | ID |
+|--------|-----|
+| Email Client | `email_mm0zexk0` |
+| GCLID | `text_mm2egv20` |
 
-7. **Board „Solicitari 2”** (dacă nu s-a găsit nimic în „Solicitari”):
-   - **momentan matching doar pe email** — în schema primită **nu există coloană GCLID** pe acest board;
-   - în cod există constanta `COL_GCLID_SOLICITARI_2 = null` și comentarii: când adaugi ID-ul coloanei GCLID în monday, setezi constanta și poți replica regulile de la „Solicitari”.
+---
 
-8. Dacă există lead valid → `change_multiple_column_values`: **Sursa Client** = `{ "label": "Website" }`, **link to Solicitari** = `{ "item_ids": ["<leadId>"] }`.
+## Reguli de matching (ambele boarduri de lead)
 
-9. Dacă nu există lead → **nu** se modifică comanda; răspuns JSON cu `skipped` clar.
+1. **Email**: egal după **trim** și **lowercase**.
+2. **GCLID pe lead**: trebuie să existe și să nu fie gol (după trim).
+3. Dacă **comanda** are GCLID: **egalitate strictă** cu GCLID lead.
+4. Dacă **comanda** nu are GCLID: se acceptă lead **doar dacă** GCLID pe lead este completat.
+5. **Ordinea**: întâi **„Solicitari”**, apoi **„Solicitari 2”**.
+6. Dacă există **mai multe** leaduri care trec filtrele: se folosește **primul** din lista returnată de căutarea pe email (comportament documentat în cod prin log).
 
 ---
 
@@ -139,22 +150,19 @@ Dacă apare **403** sau erori de permisiuni, verifică rolul utilizatorului asoc
 
 | Situație | Exemplu |
 |----------|---------|
+| Nimic de schimbat (idempotent) | `{ "ok": true, "skipped": "no changes needed", "matchedIn": "Solicitari", ... }` |
 | Status nu e livrat | `{ "ok": true, "skipped": "status not delivered" }` |
-| Email lipsă pe comandă | `{ "ok": true, "skipped": "order email missing" }` |
 | Fără lead | `{ "ok": true, "skipped": "no matching lead", "orderId": "..." }` |
-| Succes | `{ "ok": true, "matchedIn": "Solicitari", "leadId": "...", "orderId": "...", "updated": true }` |
-| Eroare API / config | `{ "ok": false, "error": "..." }` |
-
-Logurile în Netlify (**Functions → Logs**) includ mesaje precum: verificare challenge, status nepotrivit, lead găsit în Solicitari / Solicitari 2, lipsă lead, update reușit, erori monday.
+| Update făcut | `{ "ok": true, "matchedIn": "Solicitari", "leadId": "...", "orderId": "...", "updated": true, "changes": { "source": true, "relation": false } }` |
+| Eroare | `{ "ok": false, "error": "..." }` |
 
 ---
 
 ## Limitări
 
-- **„Solicitari 2”**: fără coloană GCLID în schemă, pot exista **mai multe solicitări cu același email**; funcția folosește **primul** item care trece filtrele și loghează dacă sunt mai multe potriviri. După introducerea GCLID, completează `COL_GCLID_SOLICITARI_2` și logica din `isSolicitari2Match`.
-- **Căutare după email în monday**: `items_page_by_column_values` face potrivire **exactă** pe valoarea din coloana de email; normalizarea la lowercase presupune că datele din monday sunt aliniate (ex. emailuri stocate în formă comparabilă).
-- **Volum mare de itemi**: paginarea este limitată la un număr maxim de pagini pentru a evita bucle infinite; la boarduri foarte mari, poate fi nevoie de ajustare.
-- **Forma payload-ului webhook**: se încearcă mai multe chei uzuale; dacă monday trimite un format nou, poate fi nevoie să extinzi `extractItemIdFromPayload`.
+- **Parsare relație** (`board_relation_*`): se încearcă mai multe forme JSON (`linkedPulseIds`, `item_ids`). Dacă monday returnează alt format, idempotency pe relație poate necesita ajustare.
+- **Căutare email**: `items_page_by_column_values` folosește potrivirea monday pe coloana de email; normalizarea la lowercase presupune date consistente în monday.
+- **Paginare**: limită de siguranță la numărul de pagini în căutarea după email.
 
 ---
 
@@ -165,10 +173,8 @@ npm i -g netlify-cli
 netlify dev
 ```
 
-Funcția va fi disponibilă la un URL local afișat de CLI (de obicei tot sub `/.netlify/functions/monday-webhook`).
-
 ---
 
 ## Licență
 
-MIT (sau conform `package.json`).
+MIT (conform `package.json`).

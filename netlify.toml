@@ -1,6 +1,3 @@
-[build]
-  functions = "netlify/functions"
-
 [functions]
-  # Node 18+ are fetch nativ; fără dependențe npm, bundlerul implicit e suficient.
+  directory = "netlify/functions"
   node_bundler = "esbuild"
