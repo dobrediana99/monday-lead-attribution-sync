@@ -4,6 +4,9 @@
   "private": true,
   "description": "Netlify serverless webhook: leagă comenzi finalizate de solicitări (monday.com GraphQL).",
   "license": "MIT",
+  "scripts": {
+    "start": "node server.js"
+  },
   "engines": {
     "node": ">=18"
   }
