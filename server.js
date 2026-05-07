@@ -1,69 +1,69 @@
-// Minimal HTTP server for Railway (no frameworks).
+// Express server for Railway: webhook receiver for monday.com.
 // Exposes:
 // - GET /health -> { ok: true }
-// - POST /webhook -> delegates to existing Netlify function handler
+// - POST /webhook
+// - POST /monday-webhook
+// - POST /.netlify/functions/monday-webhook
+//
+// All POST endpoints delegate to the existing Netlify Function handler without
+// changing the business logic.
 
-const http = require("http");
+const express = require("express");
 const { handler } = require("./netlify/functions/monday-webhook.js");
 
-function sendJson(res, statusCode, payload, extraHeaders) {
-  const body = JSON.stringify(payload);
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body),
-    ...(extraHeaders || {}),
-  });
-  res.end(body);
-}
+const app = express();
 
-function readRequestBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
+// Capture raw body so we can pass a JSON string to the Netlify handler.
+app.use(
+  express.json({
+    limit: "2mb",
+    verify: (req, _res, buf) => {
+      req.rawBody = buf ? buf.toString("utf8") : "";
+    },
+  })
+);
 
-const server = http.createServer(async (req, res) => {
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true });
+});
+
+async function delegateToNetlifyHandler(req, res) {
   try {
-    const method = req.method || "GET";
-    const url = req.url || "/";
+    // monday expects exact challenge echo; handler already does this if body parses.
+    const bodyString =
+      typeof req.rawBody === "string" && req.rawBody.trim() ? req.rawBody : JSON.stringify(req.body ?? {});
 
-    if (method === "GET" && url === "/health") {
-      return sendJson(res, 200, { ok: true });
-    }
+    const event = {
+      httpMethod: "POST",
+      headers: req.headers || {},
+      body: bodyString,
+      isBase64Encoded: false,
+    };
 
-    if (method === "POST" && url === "/webhook") {
-      const rawBody = await readRequestBody(req);
+    const fnResponse = await handler(event);
+    const statusCode = fnResponse?.statusCode ?? 200;
+    const headers = fnResponse?.headers ?? { "Content-Type": "application/json; charset=utf-8" };
+    const body = fnResponse?.body ?? "";
 
-      // Map standard HTTP request to Netlify Function event shape
-      const event = {
-        httpMethod: "POST",
-        headers: req.headers || {},
-        body: rawBody || "",
-        isBase64Encoded: false,
-      };
-
-      const fnResponse = await handler(event);
-      const statusCode = fnResponse?.statusCode ?? 200;
-      const headers = fnResponse?.headers ?? { "Content-Type": "application/json; charset=utf-8" };
-      const body = fnResponse?.body ?? "";
-
-      res.writeHead(statusCode, headers);
-      res.end(body);
-      return;
-    }
-
-    return sendJson(res, 404, { ok: false, error: "Not found" });
+    Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
+    res.status(statusCode).send(body);
   } catch (err) {
     console.error("server error", err);
-    return sendJson(res, 500, { ok: false, error: "Internal server error" });
+    res.status(500).json({ ok: false, error: "Internal server error" });
   }
+}
+
+app.post("/webhook", delegateToNetlifyHandler);
+app.post("/monday-webhook", delegateToNetlifyHandler);
+app.post("/.netlify/functions/monday-webhook", delegateToNetlifyHandler);
+
+// Basic 404 JSON to help debug Railway routing issues.
+app.use((_req, res) => {
+  res.status(404).json({ ok: false, error: "Not found" });
 });
 
 const PORT = Number(process.env.PORT) || 3000;
-server.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server listening on 0.0.0.0:${PORT}`);
 });
 
