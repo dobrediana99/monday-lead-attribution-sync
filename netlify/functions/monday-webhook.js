@@ -17,6 +17,7 @@ const BOARD_SOLICITARI_2 = "5092436128";
 // --- Coloane: Comenzi / Curse ---
 const COL_STATUS_TRANSPORT = "color_mkse52dk";
 const COL_EMAIL_COMANDA = "email_mkse8jyb";
+const COL_EMAIL_CONTABILITATE = "email_mkvneqyg";
 const COL_GCLID_COMANDA = "text_mm21cvwz";
 const COL_SURSA_CLIENT = "color_mktcvtpz";
 const COL_LINK_SOLICITARI = "board_relation_mm21tkwr";
@@ -38,6 +39,7 @@ const SURSA_WEBSITE_LABEL = "Website";
 const ORDER_COLUMN_IDS = [
   COL_STATUS_TRANSPORT,
   COL_EMAIL_COMANDA,
+  COL_EMAIL_CONTABILITATE,
   COL_GCLID_COMANDA,
   COL_SURSA_CLIENT,
   COL_LINK_SOLICITARI,
@@ -142,6 +144,13 @@ function getEmailValue(item, columnId) {
 function normalizeEmail(value) {
   if (value == null) return "";
   return String(value).trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  const s = normalizeEmail(value);
+  if (!s) return false;
+  // Basic validation: enough to drop empty/obviously invalid values.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
 /**
@@ -365,7 +374,7 @@ function shouldUpdateOrder({ item, leadBoardLabel, leadId }) {
   return { shouldUpdate: sourceNeedsUpdate, sourceNeedsUpdate, relationNeedsUpdate: false };
 }
 
-async function findMatchingLead(orderEmail, orderGclidRaw) {
+async function findMatchingLeadByEmail(orderEmail, orderGclidRaw) {
   const orderEmailNorm = normalizeEmail(orderEmail);
   const orderGclidNorm = normalizeGclid(orderGclidRaw);
 
@@ -404,6 +413,30 @@ async function findMatchingLead(orderEmail, orderGclidRaw) {
   }
 
   console.log("no matching lead found");
+  return { lead: null, reason: "no matching lead" };
+}
+
+async function findMatchingLead(orderEmails, orderGclidRaw) {
+  const emails = Array.isArray(orderEmails) ? orderEmails : [orderEmails];
+  const uniqueEmails = [];
+  for (const e of emails) {
+    const n = normalizeEmail(e);
+    if (!isValidEmail(n)) continue;
+    if (!uniqueEmails.includes(n)) uniqueEmails.push(n);
+  }
+
+  if (!uniqueEmails.length) {
+    return { lead: null, reason: "order email missing" };
+  }
+
+  // Deterministic order: first email in list wins if it matches.
+  for (const email of uniqueEmails) {
+    const result = await findMatchingLeadByEmail(email, orderGclidRaw);
+    if (result && result.lead) {
+      return { ...result, matchedEmail: email };
+    }
+  }
+
   return { lead: null, reason: "no matching lead" };
 }
 
@@ -614,15 +647,27 @@ exports.handler = async (event) => {
       return jsonResponse(200, { ok: true, skipped: "status not delivered" });
     }
 
-    const orderEmail = getEmailValue(item, COL_EMAIL_COMANDA);
-    if (!normalizeEmail(orderEmail)) {
+    const emailSemnare = getEmailValue(item, COL_EMAIL_COMANDA);
+    const emailContabilitate = getEmailValue(item, COL_EMAIL_CONTABILITATE);
+    const emailSemnareNorm = normalizeEmail(emailSemnare);
+    const emailContabilitateNorm = normalizeEmail(emailContabilitate);
+
+    if (isValidEmail(emailSemnareNorm)) {
+      console.log(`email semnare gasit pentru item ${itemId}: ${emailSemnareNorm}`);
+    }
+    if (isValidEmail(emailContabilitateNorm)) {
+      console.log(`email contabilitate gasit pentru item ${itemId}: ${emailContabilitateNorm}`);
+    }
+
+    const candidateEmails = [emailSemnareNorm, emailContabilitateNorm].filter(isValidEmail);
+    if (!candidateEmails.length) {
       console.log(`order email missing for item ${itemId}`);
       return jsonResponse(200, { ok: true, skipped: "order email missing" });
     }
 
     const orderGclid = getTextValue(item, COL_GCLID_COMANDA);
 
-    const { lead, boardLabel, reason } = await findMatchingLead(orderEmail, orderGclid);
+    const { lead, boardLabel, reason, matchedEmail } = await findMatchingLead(candidateEmails, orderGclid);
     if (!lead) {
       return jsonResponse(200, {
         ok: true,
@@ -630,6 +675,9 @@ exports.handler = async (event) => {
         orderId: String(itemId),
       });
     }
+    console.log(
+      `matching lead found using email ${matchedEmail || "unknown"} (board=${boardLabel}, leadId=${String(lead.id)})`
+    );
 
     const { shouldUpdate, sourceNeedsUpdate, relationNeedsUpdate } = shouldUpdateOrder({
       item,
